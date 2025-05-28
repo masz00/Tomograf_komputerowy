@@ -4,15 +4,15 @@ import matplotlib.pyplot as plt
 import pydicom
 from pydicom.dataset import Dataset, FileDataset
 from pydicom.uid import ExplicitVRLittleEndian, CTImageStorage
-from skimage.transform import radon, iradon
 from skimage.util import img_as_ubyte
 from skimage.exposure import rescale_intensity
 from skimage.io import imread
-
+from scipy.fftpack import fft, ifft, fftfreq
 
 
 
 def bresenham_line(x0, y0, x1, y1):
+
     points_x = []
     points_y = []
     
@@ -39,34 +39,7 @@ def bresenham_line(x0, y0, x1, y1):
             
     return np.array(points_y), np.array(points_x)
 
-import numpy as np
-from scipy.ndimage import rotate
-from scipy.fftpack import fft, ifft, fftfreq
-
-def generate_parallel_rays(img_shape, angle_deg, detector_count, detector_span_deg):
-    angle_rad = np.deg2rad(angle_deg)
-    detector_span_rad = np.deg2rad(detector_span_deg)
-    
-    center = np.array(img_shape) / 2
-    max_length = max(img_shape)
-
-    detector_positions = np.linspace(-0.5, 0.5, detector_count) * detector_span_rad
-    ray_vectors = np.array([
-        [np.cos(angle_rad + np.pi / 2 + offset), np.sin(angle_rad + np.pi / 2 + offset)]
-        for offset in detector_positions
-    ])
-
-    starts = []
-    ends = []
-    for vec in ray_vectors:
-        midpoint = center + max_length * 0.5 * np.array([np.cos(angle_rad), np.sin(angle_rad)])
-        start = midpoint + vec * max_length
-        end = midpoint - vec * max_length
-        starts.append(start.astype(int))
-        ends.append(end.astype(int))
-    return starts, ends
-
-def radon_transform_parallel(img, angles, detector_count=180, detector_span=180):
+def radon_transform_parallel(img, angles, detector_count=180):
     img = img.astype(np.float32)
     sinogram = np.zeros((detector_count, len(angles)), dtype=np.float32)
     img_center = np.array(img.shape) / 2
@@ -194,29 +167,58 @@ with tab1:
 
         angle_step = st.slider("Krok kąta (∆α)", min_value=0.5, max_value=4.0, step = 0.5, value=2.0)
         detector_count = st.slider("Liczba detektorów", min_value=90, max_value=720, step=90, value=180)
-        fan_angle = st.slider("Rozpiętość wachlarza (stopnie)", min_value=45, max_value=270, step=45, value=180)
+        simulation_mode = st.radio("Tryb symulacji", ["Pełna symulacja", "Krok po kroku"])
+
+        full_theta = np.arange(0, 180, angle_step)
         
-        theta = np.arange(0, 180, angle_step)  # angle_step z suwaka
-        sinogram = radon_transform_parallel(img, theta, detector_count=detector_count, detector_span=fan_angle)
-        reconstructed_img = inverse_radon_transform_parallel(sinogram, theta, output_size=img.shape[0])
+        if simulation_mode == "Pełna symulacja":
+            sinogram = radon_transform_parallel(img, full_theta, detector_count=detector_count)
+            reconstructed_img = inverse_radon_transform_parallel(sinogram, full_theta, output_size=img.shape[0])
+            
+            st.subheader("Obraz wejściowy")
+            st.image(img, clamp=True, caption="Obraz wejściowy")
 
-        st.subheader("Obraz wejściowy")
-        st.image(img, clamp=True, caption="Obraz wejściowy")
+            st.subheader("Sinogram")
+            fig, ax = plt.subplots()
+            ax.imshow(sinogram, cmap="gray", aspect="auto")
+            st.pyplot(fig)
 
-        st.subheader("Sinogram")
-        fig, ax = plt.subplots()
-        ax.imshow(sinogram, cmap="gray", aspect="auto")
-        st.pyplot(fig)
-
-        st.subheader("Odtworzony obraz")
-        fig, ax = plt.subplots()
-        ax.imshow(reconstructed_img, cmap="gray")
-        st.pyplot(fig)
+            st.subheader("Odtworzony obraz")
+            fig, ax = plt.subplots()
+            ax.imshow(reconstructed_img, cmap="gray")
+            st.pyplot(fig)
+            
+        else:
+            max_angle = 180
+            current_angle = st.slider("Kąt rekonstrukcji", min_value=int(angle_step), max_value=int(max_angle), step=int(angle_step), value=int(angle_step))
+            partial_theta = full_theta[full_theta <= current_angle]
+            partial_sinogram = radon_transform_parallel(img, partial_theta, detector_count=detector_count)
+            partial_reconstruction = inverse_radon_transform_parallel(partial_sinogram, partial_theta, output_size=img.shape[0])
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Obraz wejściowy")
+                st.image(img, clamp=True, caption="Obraz wejściowy")
+                
+                st.subheader("Częściowy sinogram")
+                fig, ax = plt.subplots()
+                ax.imshow(partial_sinogram, cmap="gray", aspect="auto")
+                ax.set_title(f"Sinogram (kąty 0-{current_angle}°)")
+                st.pyplot(fig)
+            
+            with col2:
+                st.subheader("Częściowa rekonstrukcja")
+                fig, ax = plt.subplots()
+                ax.imshow(partial_reconstruction, cmap="gray")
+                ax.set_title(f"Rekonstrukcja (kąty 0-{current_angle}°)")
+                st.pyplot(fig)
+                
+            reconstructed_img = partial_reconstruction
         
         st.subheader("Dane pacjenta")
-        patient_name = st.text_input("Imię i nazwisko pacjenta", "Jan Kowalski", key="patient_name")
+        patient_name = st.text_input("Imię i nazwisko pacjenta", key="patient_name")
         study_date = st.date_input("Data badania", key="study_date")
-        image_comments = st.text_area("Komentarze", "Symulacja TK", key="image_comments")
+        image_comments = st.text_area("Komentarze", key="image_comments")
 
         if st.button("Zapisz jako DICOM"):
             patient_data = {
@@ -227,7 +229,6 @@ with tab1:
 
             save_as_dicom(f"{patient_name.replace(' ', '_')}_{study_date}.dcm", reconstructed_img, patient_data)
             st.success(f"Plik DICOM został zapisany jako `{patient_name.replace(' ', '_')}_{study_date}.dcm`")
-
 with tab2:
     st.subheader("Odczyt plików DICOM")
     uploaded_dicom = st.file_uploader("Wybierz plik DICOM do odczytu", type=["dcm"], key="dicom_uploader")
